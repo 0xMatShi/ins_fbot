@@ -33,8 +33,9 @@ from src import db
 load_dotenv()
 
 BOT_TOKEN     = os.environ["BOT_TOKEN"]
-POLL_INTERVAL = 10 * 60
+POLL_INTERVAL      = 10 * 60
 INITIAL_SEND_COUNT = 25
+INITIAL_MAX_AGE_S  = 24 * 3600   # не слать трейды старше 24 часов при первом запуске
 STATE_FILE         = Path("state.json")
 
 API_URL = "https://www.polysights.xyz/api/insider-finder"
@@ -200,7 +201,7 @@ def build_trade_text(trade: dict, wallet: dict) -> str:
     side_e     = "🟢" if side == "BUY" else "🔴"
     mkt_link   = f'<a href="{polymarket_url(event_slug)}">{title}</a>' if event_slug else title
     poly_link  = f'<a href="{polygonscan_tx(tx_hash)}">Transaction on Polygonscan</a>' if tx_hash else "Polygonscan"
-    raw_name   = wallet.get("pseudonym") or wallet.get("name") or trade.get("pseudonym") or trade.get("name") or ""
+    raw_name   = wallet.get("name") or trade.get("name") or ""
     proxy_addr = trade.get('proxy_wallet') or trade.get('proxyWallet', '')
     name_line  = f"👤 <b>Name:</b> {html.escape(raw_name)}" if raw_name else None
     wallet_line = f"🔑 <b>Wallet:</b> <code>{proxy_addr}</code>"
@@ -249,7 +250,7 @@ def build_wallet_text(trade: dict, wallet: dict) -> str:
     ts         = trade.get("timestamp") or 0
 
     # Актуальные метрики кошелька
-    name       = html.escape(wallet.get("pseudonym") or wallet.get("name") or "Anonymous")
+    name       = html.escape(wallet.get("name") or trade.get("name") or "")
     total_tr   = wallet.get("total_trades") or 0
     mkts       = wallet.get("markets_traded") or 0
     open_pos   = wallet.get("open_positions") or 0
@@ -333,7 +334,7 @@ def wallet_kb(tx_hash: str) -> InlineKeyboardMarkup:
 def load_state() -> dict:
     if STATE_FILE.exists():
         return json.loads(STATE_FILE.read_text())
-    return {"last_timestamp": 0, "seen_tx": []}
+    return {"last_timestamp": 0}
 
 
 def save_state(state: dict) -> None:
@@ -399,40 +400,36 @@ async def send_trades(bot: Bot, trades: list[dict]) -> None:
 async def poll_loop(bot: Bot) -> None:
     state        = load_state()
     is_first_run = state["last_timestamp"] == 0
-    print(f"[poll] Запуск. first_run={is_first_run}")
+    print(f"[poll] Запуск. first_run={is_first_run}, last_timestamp={state['last_timestamp']}")
 
     async with aiohttp.ClientSession() as session:
         while True:
             try:
-                trades   = await fetch_latest_trades(session)
-                seen_tx: set[str] = set(state.get("seen_tx", []))
+                trades = await fetch_latest_trades(session)
 
                 if is_first_run:
-                    to_send = sorted(trades[:INITIAL_SEND_COUNT], key=lambda t: t.get("timestamp") or 0)
-                    print(f"[poll] Первый запуск — {len(to_send)} транзакций")
+                    cutoff  = int(datetime.now(timezone.utc).timestamp()) - INITIAL_MAX_AGE_S
+                    fresh   = [t for t in trades if (t.get("timestamp") or 0) >= cutoff]
+                    to_send = sorted(fresh[:INITIAL_SEND_COUNT], key=lambda t: t.get("timestamp") or 0)
+                    print(f"[poll] Первый запуск — {len(to_send)} свежих транзакций (не старше {INITIAL_MAX_AGE_S//3600}ч)")
                     await send_trades(bot, to_send)
                     is_first_run = False
                 else:
                     new = sorted(
-                        [t for t in trades
-                         if (t.get("timestamp") or 0) > state["last_timestamp"]
-                         and tx_key(t) not in seen_tx],
+                        [t for t in trades if (t.get("timestamp") or 0) > state["last_timestamp"]],
                         key=lambda t: t.get("timestamp") or 0,
                     )
                     if new:
                         print(f"[poll] {len(new)} новых транзакций")
                         await send_trades(bot, new)
-                        for t in new:
-                            seen_tx.add(tx_key(t))
                     else:
                         print("[poll] Нет новых транзакций")
 
                 if trades:
-                    state["last_timestamp"] = max(
-                        state["last_timestamp"],
-                        max(t.get("timestamp") or 0 for t in trades),
-                    )
-                state["seen_tx"] = list(seen_tx)[-500:]
+                    new_ts = max(t.get("timestamp") or 0 for t in trades)
+                    if new_ts > state["last_timestamp"]:
+                        state["last_timestamp"] = new_ts
+                        print(f"[poll] last_timestamp обновлён → {new_ts}")
                 save_state(state)
 
             except Exception as e:
