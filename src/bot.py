@@ -343,7 +343,7 @@ def save_state(state: dict) -> None:
 # ─── API ─────────────────────────────────────────────────────────────────────
 
 async def fetch_latest_trades(session: aiohttp.ClientSession) -> list[dict]:
-    params = "batch=1&skipCount=true"
+    params = "batch=0&skipCount=true"
     for k, v in FILTERS.items():
         params += f"&{k}={v}"
     url = f"{API_URL}?{params}"
