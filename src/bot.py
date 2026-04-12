@@ -11,7 +11,6 @@ import asyncio
 import html
 import json
 import os
-import signal
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -535,17 +534,19 @@ async def main() -> None:
         BotCommand(command="last25_trades", description="Последние 25 трейдов из базы"),
     ])
     print("[main] Бот запущен. Для остановки: Ctrl+C")
-    loop = asyncio.get_event_loop()
-    tasks = asyncio.gather(
-        dp.start_polling(bot, skip_updates=True),
-        poll_loop(bot),
-    )
-    for sig in (signal.SIGINT, signal.SIGTERM):
-        loop.add_signal_handler(sig, tasks.cancel)
+    polling_task = asyncio.create_task(dp.start_polling(bot, skip_updates=True))
+    poll_task    = asyncio.create_task(poll_loop(bot))
     try:
-        await tasks
-    except asyncio.CancelledError:
-        pass
+        done, pending = await asyncio.wait(
+            [polling_task, poll_task],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        for t in pending:
+            t.cancel()
+            try:
+                await t
+            except asyncio.CancelledError:
+                pass
     finally:
         print("[main] Остановка...")
         await bot.session.close()
