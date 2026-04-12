@@ -35,7 +35,6 @@ load_dotenv()
 BOT_TOKEN     = os.environ["BOT_TOKEN"]
 POLL_INTERVAL      = 10 * 60
 INITIAL_SEND_COUNT = 25
-INITIAL_MAX_AGE_S  = 24 * 3600   # не слать трейды старше 24 часов при первом запуске
 STATE_FILE         = Path("state.json")
 
 API_URL = "https://www.polysights.xyz/api/insider-finder"
@@ -408,10 +407,10 @@ async def poll_loop(bot: Bot) -> None:
                 trades = await fetch_latest_trades(session)
 
                 if is_first_run:
-                    cutoff  = int(datetime.now(timezone.utc).timestamp()) - INITIAL_MAX_AGE_S
-                    fresh   = [t for t in trades if (t.get("timestamp") or 0) >= cutoff]
-                    to_send = sorted(fresh[:INITIAL_SEND_COUNT], key=lambda t: t.get("timestamp") or 0)
-                    print(f"[poll] Первый запуск — {len(to_send)} свежих транзакций (не старше {INITIAL_MAX_AGE_S//3600}ч)")
+                    # Берём топ-25 по timestamp (как на сайте), отправляем от старых к новым
+                    top25   = sorted(trades, key=lambda t: t.get("timestamp") or 0, reverse=True)[:INITIAL_SEND_COUNT]
+                    to_send = sorted(top25,  key=lambda t: t.get("timestamp") or 0)
+                    print(f"[poll] Первый запуск — {len(to_send)} транзакций")
                     await send_trades(bot, to_send)
                     is_first_run = False
                 else:
@@ -534,8 +533,14 @@ async def main() -> None:
         BotCommand(command="start",         description="Подписаться на уведомления"),
         BotCommand(command="last25_trades", description="Последние 25 трейдов из базы"),
     ])
-    print("[main] Бот запущен")
-    await asyncio.gather(
-        dp.start_polling(bot, skip_updates=True),
-        poll_loop(bot),
-    )
+    print("[main] Бот запущен. Для остановки: Ctrl+C")
+    try:
+        await asyncio.gather(
+            dp.start_polling(bot, skip_updates=True),
+            poll_loop(bot),
+        )
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        pass
+    finally:
+        print("[main] Остановка...")
+        await bot.session.close()
