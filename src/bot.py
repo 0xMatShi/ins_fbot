@@ -18,13 +18,12 @@ import aiohttp
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import Command
+from aiogram.exceptions import TelegramRetryAfter
 from aiogram.types import (
     BotCommand,
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    Message,
 )
 from dotenv import load_dotenv
 
@@ -32,7 +31,10 @@ from src import db
 
 load_dotenv()
 
-BOT_TOKEN     = os.environ["BOT_TOKEN"]
+BOT_TOKEN          = os.environ["BOT_TOKEN"]
+TARGET_CHAT_ID     = int(os.environ["TARGET_CHAT_ID"])
+_thread_env        = os.environ.get("TARGET_THREAD_ID", "").strip()
+TARGET_THREAD_ID   = int(_thread_env) if _thread_env else None
 POLL_INTERVAL      = 10 * 60
 INITIAL_SEND_COUNT = 25
 STATE_FILE         = Path("state.json")
@@ -364,34 +366,33 @@ def tx_key(trade: dict) -> str:
 
 
 async def send_trades(bot: Bot, trades: list[dict]) -> None:
-    # Сохраняем в БД всегда, независимо от наличия подписчиков
     for trade in trades:
         await db.save_trade(trade)
     print(f"[send] Сохранено в БД: {len(trades)} трейдов")
 
-    chat_ids = await db.get_all_users()
-    if not chat_ids:
-        print("[send] Нет подписчиков — рассылка пропущена")
-        return
-
-    print(f"[send] Рассылка {len(trades)} трейдов → {len(chat_ids)} подписчик(ам)")
+    print(f"[send] Рассылка {len(trades)} трейдов → chat={TARGET_CHAT_ID} thread={TARGET_THREAD_ID}")
     for trade in trades:
         key    = tx_key(trade)
         wallet = await db.get_wallet(trade.get("proxyWallet", ""))
         text   = build_trade_text(trade, wallet or trade)
         kb     = trade_kb(key)
-
-        for chat_id in chat_ids:
+        while True:
             try:
                 await bot.send_message(
-                    chat_id, text,
+                    TARGET_CHAT_ID, text,
+                    message_thread_id=TARGET_THREAD_ID,
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
                     reply_markup=kb,
                 )
+                break
+            except TelegramRetryAfter as e:
+                print(f"[send] FloodWait {e.retry_after}s — жду...")
+                await asyncio.sleep(e.retry_after + 1)
             except Exception as e:
-                print(f"[send] chat_id={chat_id}: {e}")
-        await asyncio.sleep(0.3)
+                print(f"[send] Ошибка отправки: {e}")
+                break
+        await asyncio.sleep(2)
 
 
 # ─── Полинг ──────────────────────────────────────────────────────────────────
@@ -489,39 +490,6 @@ async def cb_back(call: CallbackQuery) -> None:
     await call.answer()
 
 
-@dp.message(Command("start"))
-async def cmd_start(message: Message) -> None:
-    print(f"[cmd] {user_tag(message.from_user)} → /start")
-    await db.add_user(message.chat.id)
-    await message.answer(
-        "👋 <b>Polysights Insider Bot</b>\n\n"
-        "Слежу за новыми трейдами на <b>insider-finder</b> каждые 10 минут.\n"
-        "Фильтры: <b>Unique Markets 0–5</b>, <b>WC/TX Delta 0–25d</b>\n\n"
-        "Используй /last25_trades чтобы посмотреть последние трейды из базы.",
-        parse_mode=ParseMode.HTML,
-    )
-
-
-@dp.message(Command("last25_trades"))
-async def cmd_last25_trades(message: Message) -> None:
-    print(f"[cmd] {user_tag(message.from_user)} → /last25_trades")
-    trades = await db.get_recent_trades(25)
-    if not trades:
-        await message.answer("В базе пока нет трейдов.")
-        return
-    print(f"[cmd] /last25_trades → отправляем {len(trades)} трейдов")
-    await message.answer(f"Последние {len(trades)} трейдов из базы:")
-    for trade in reversed(trades):  # от старых к новым
-        wallet = await db.get_wallet(trade["proxy_wallet"])
-        text   = build_trade_text(trade, wallet or trade)
-        key    = trade["tx_hash"]
-        await message.answer(
-            text,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            reply_markup=trade_kb(key),
-        )
-        await asyncio.sleep(0.2)
 
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
@@ -529,10 +497,7 @@ async def cmd_last25_trades(message: Message) -> None:
 async def main() -> None:
     await db.init_db()
     bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
-    await bot.set_my_commands([
-        BotCommand(command="start",         description="Подписаться на уведомления"),
-        BotCommand(command="last25_trades", description="Последние 25 трейдов из базы"),
-    ])
+    await bot.set_my_commands([])
     print("[main] Бот запущен. Для остановки: Ctrl+C")
     polling_task = asyncio.create_task(dp.start_polling(bot, skip_updates=True))
     poll_task    = asyncio.create_task(poll_loop(bot))
