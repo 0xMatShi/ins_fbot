@@ -448,21 +448,30 @@ def user_tag(user) -> str:
     return f"{name} (id={user.id})"
 
 
+async def edit_with_retry(message, text: str, **kwargs) -> None:
+    while True:
+        try:
+            await message.edit_text(text, **kwargs)
+            return
+        except TelegramRetryAfter as e:
+            print(f"[edit] FloodWait {e.retry_after}s — жду...")
+            await asyncio.sleep(e.retry_after + 1)
+
+
 @dp.callback_query(F.data.startswith("wallet:"))
 async def cb_wallet(call: CallbackQuery) -> None:
     tx_hash = call.data.split(":", 1)[1]
     print(f"[btn] {user_tag(call.from_user)} → Посмотреть кошелек tx={tx_hash[:16]}...")
     trade = await db.get_trade(tx_hash)
     if not trade:
-        print(f"[btn] tx={tx_hash[:16]}... не найден в БД")
         await call.answer("Транзакция не найдена в БД", show_alert=True)
         return
     wallet = await db.get_wallet(trade["proxy_wallet"])
     if not wallet:
-        print(f"[btn] кошелёк {trade['proxy_wallet'][:16]}... не найден в БД")
         await call.answer("Данные кошелька не найдены", show_alert=True)
         return
-    await call.message.edit_text(
+    await edit_with_retry(
+        call.message,
         build_wallet_text(trade, wallet),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
@@ -477,11 +486,11 @@ async def cb_back(call: CallbackQuery) -> None:
     print(f"[btn] {user_tag(call.from_user)} → Назад tx={tx_hash[:16]}...")
     trade = await db.get_trade(tx_hash)
     if not trade:
-        print(f"[btn] tx={tx_hash[:16]}... не найден в БД")
         await call.answer("Транзакция не найдена в БД", show_alert=True)
         return
     wallet = await db.get_wallet(trade["proxy_wallet"])
-    await call.message.edit_text(
+    await edit_with_retry(
+        call.message,
         build_trade_text(trade, wallet or trade),
         parse_mode=ParseMode.HTML,
         disable_web_page_preview=True,
