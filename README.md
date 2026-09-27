@@ -111,7 +111,7 @@ TARGET_CHAT_ID=your-numeric-chat-id
 Запустите Telegram-бота из корня репозитория:
 
 ```bash
-uv run python main.py
+uv run main.py
 ```
 
 При старте бот создаёт `insider.db`, если файла ещё нет, затем начинает принимать обновления Telegram и опрашивать Polysights. Остановить процесс можно через `Ctrl+C`. Уведомления содержат inline-кнопку для просмотра метрик кошелька; доступных slash-команд в коде нет.
